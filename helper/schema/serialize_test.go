@@ -259,3 +259,71 @@ func TestSerializeForHash(t *testing.T) {
 		}
 	}
 }
+
+func TestSerializeForHash_Hardened(t *testing.T) {
+	t.Parallel()
+
+	// 1. Unknown sentinel values across different schema types
+	sentinel := "74D93920-ED26-11E3-AC10-0800200C9A66"
+	types := []*Schema{
+		{Type: TypeInt},
+		{Type: TypeBool},
+		{Type: TypeFloat},
+		{Type: TypeList, Elem: &Schema{Type: TypeString}},
+		{Type: TypeSet, Elem: &Schema{Type: TypeString}},
+		{Type: TypeMap, Elem: &Schema{Type: TypeString}},
+	}
+	for _, s := range types {
+		var buf bytes.Buffer
+		SerializeValueForHash(&buf, sentinel, s)
+		if buf.String() != "~unknown~;" {
+			t.Errorf("expected ~unknown~; for type %v, got %s", s.Type, buf.String())
+		}
+	}
+
+	// 2. TypeInt with int64, float64, string
+	var bufInt bytes.Buffer
+	SerializeValueForHash(&bufInt, int64(1234567890123), &Schema{Type: TypeInt})
+	if bufInt.String() != "1234567890123;" {
+		t.Errorf("unexpected int64 serialization: %s", bufInt.String())
+	}
+
+	// 3. TypeBool with string representation
+	var bufBool bytes.Buffer
+	SerializeValueForHash(&bufBool, "true", &Schema{Type: TypeBool})
+	if bufBool.String() != "1;" {
+		t.Errorf("unexpected bool string serialization: %s", bufBool.String())
+	}
+
+	// 4. TypeSet with []interface{} instead of *Set
+	var bufSet bytes.Buffer
+	SerializeValueForHash(&bufSet, []interface{}{"item1"}, &Schema{Type: TypeSet, Elem: &Schema{Type: TypeString}})
+	if bufSet.String() != "{item1;};" {
+		t.Errorf("unexpected set slice serialization: %s", bufSet.String())
+	}
+
+	// 5. SerializeResourceForHash with non-map or nil value
+	var bufRes bytes.Buffer
+	res := &Resource{
+		Schema: map[string]*Schema{
+			"field": {Type: TypeString, Optional: true},
+		},
+	}
+	SerializeResourceForHash(&bufRes, nil, res)
+	if bufRes.Len() != 0 {
+		t.Errorf("expected empty buffer for nil resource value")
+	}
+
+	bufRes.Reset()
+	SerializeResourceForHash(&bufRes, "not-a-map", res)
+	if bufRes.String() != "not-a-map" {
+		t.Errorf("expected not-a-map, got %s", bufRes.String())
+	}
+
+	// 6. SerializeResourceForHash with missing keys or nil value in map
+	bufRes.Reset()
+	SerializeResourceForHash(&bufRes, map[string]interface{}{"field": nil}, res)
+	if bufRes.String() != "field:;" {
+		t.Errorf("expected field:;, got %s", bufRes.String())
+	}
+}

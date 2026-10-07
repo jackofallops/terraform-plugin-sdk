@@ -615,7 +615,7 @@ func (d *ResourceDiff) removed(k string) bool {
 func (d *ResourceDiff) get(addr []string, source string) getResult {
 	result, err := d.multiReader.ReadFieldMerge(addr, source)
 	if err != nil {
-		panic(err)
+		return d.finalizeResult(addr, FieldReadResult{})
 	}
 
 	return d.finalizeResult(addr, result)
@@ -625,7 +625,7 @@ func (d *ResourceDiff) get(addr []string, source string) getResult {
 func (d *ResourceDiff) getExact(addr []string, source string) getResult {
 	result, err := d.multiReader.ReadFieldExact(addr, source)
 	if err != nil {
-		panic(err)
+		return d.finalizeResult(addr, FieldReadResult{})
 	}
 
 	return d.finalizeResult(addr, result)

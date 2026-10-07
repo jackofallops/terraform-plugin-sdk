@@ -55,6 +55,9 @@ func diffFromValues(ctx context.Context, prior, planned, config cty.Value, res *
 // the resource itself. These may have been marked as unknown config values, and
 // need to be removed to prevent the UnknownVariableValue from appearing the diff.
 func removeConfigUnknowns(cfg map[string]interface{}) {
+	if cfg == nil {
+		return
+	}
 	for k, v := range cfg {
 		switch v := v.(type) {
 		case string:
@@ -69,6 +72,14 @@ func removeConfigUnknowns(cfg map[string]interface{}) {
 			}
 		case map[string]interface{}:
 			removeConfigUnknowns(v)
+		case *Set:
+			if v != nil {
+				for _, i := range v.List() {
+					if m, ok := i.(map[string]interface{}); ok {
+						removeConfigUnknowns(m)
+					}
+				}
+			}
 		}
 	}
 }

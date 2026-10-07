@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +35,16 @@ const (
 
 // Verify provider server interface implementation.
 var _ tfprotov5.ProviderServer = (*GRPCProviderServer)(nil)
+
+func recoverToDiag(ctx context.Context, r interface{}, op string) *tfprotov5.Diagnostic {
+	stack := debug.Stack()
+	logging.HelperSchemaError(ctx, fmt.Sprintf("panic in %s: %v\n%s", op, r, string(stack)))
+	return &tfprotov5.Diagnostic{
+		Severity: tfprotov5.DiagnosticSeverityError,
+		Summary:  fmt.Sprintf("Internal provider panic in %s: %v", op, r),
+		Detail:   fmt.Sprintf("The provider produced an unexpected panic during %s: %v\n\nStack trace:\n%s", op, r, string(stack)),
+	}
+}
 
 func NewGRPCProviderServer(p *Provider) *GRPCProviderServer {
 	return &GRPCProviderServer{
@@ -394,9 +405,14 @@ func (s *GRPCProviderServer) PrepareProviderConfig(ctx context.Context, req *tfp
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfprotov5.ValidateResourceTypeConfigRequest) (*tfprotov5.ValidateResourceTypeConfigResponse, error) {
+func (s *GRPCProviderServer) ValidateResourceTypeConfig(ctx context.Context, req *tfprotov5.ValidateResourceTypeConfigRequest) (resp *tfprotov5.ValidateResourceTypeConfigResponse, err error) {
 	ctx = logging.InitContext(ctx)
-	resp := &tfprotov5.ValidateResourceTypeConfigResponse{}
+	resp = &tfprotov5.ValidateResourceTypeConfigResponse{}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "ValidateResourceTypeConfig"))
+		}
+	}()
 
 	schemaBlock := s.getResourceSchemaBlock(req.TypeName)
 
@@ -413,7 +429,7 @@ func (s *GRPCProviderServer) ValidateResourceTypeConfig(ctx context.Context, req
 
 	// Calling all ValidateRawResourceConfigFunc here since they validate on the raw go-cty config value
 	// and were introduced after the public provider.ValidateResource method.
-	if r.ValidateRawResourceConfigFuncs != nil {
+	if r != nil && r.ValidateRawResourceConfigFuncs != nil {
 		writeOnlyAllowed := false
 
 		if req.ClientCapabilities != nil {
@@ -441,9 +457,14 @@ func (s *GRPCProviderServer) ValidateResourceTypeConfig(ctx context.Context, req
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfigRequest) (*tfprotov5.ValidateDataSourceConfigResponse, error) {
+func (s *GRPCProviderServer) ValidateDataSourceConfig(ctx context.Context, req *tfprotov5.ValidateDataSourceConfigRequest) (resp *tfprotov5.ValidateDataSourceConfigResponse, err error) {
 	ctx = logging.InitContext(ctx)
-	resp := &tfprotov5.ValidateDataSourceConfigResponse{}
+	resp = &tfprotov5.ValidateDataSourceConfigResponse{}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "ValidateDataSourceConfig"))
+		}
+	}()
 
 	schemaBlock := s.getDatasourceSchemaBlock(req.TypeName)
 
@@ -794,8 +815,14 @@ func (s *GRPCProviderServer) ConfigureProvider(ctx context.Context, req *tfproto
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) ReadResource(ctx context.Context, req *tfprotov5.ReadResourceRequest) (*tfprotov5.ReadResourceResponse, error) {
+func (s *GRPCProviderServer) ReadResource(ctx context.Context, req *tfprotov5.ReadResourceRequest) (resp *tfprotov5.ReadResourceResponse, err error) {
 	ctx = logging.InitContext(ctx)
+	resp = &tfprotov5.ReadResourceResponse{}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "ReadResource"))
+		}
+	}()
 	readFollowingImport := false
 
 	reqPrivate := req.Private
@@ -828,12 +855,10 @@ func (s *GRPCProviderServer) ReadResource(ctx context.Context, req *tfprotov5.Re
 		}
 	}
 
-	resp := &tfprotov5.ReadResourceResponse{
-		// helper/schema did previously handle private data during refresh, but
-		// core is now going to expect this to be maintained in order to
-		// persist it in the state.
-		Private: reqPrivate,
-	}
+	// helper/schema did previously handle private data during refresh, but
+	// core is now going to expect this to be maintained in order to
+	// persist it in the state.
+	resp.Private = reqPrivate
 
 	res, ok := s.provider.ResourcesMap[req.TypeName]
 	if !ok {
@@ -1003,9 +1028,14 @@ func (s *GRPCProviderServer) ReadResource(ctx context.Context, req *tfprotov5.Re
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) PlanResourceChange(ctx context.Context, req *tfprotov5.PlanResourceChangeRequest) (*tfprotov5.PlanResourceChangeResponse, error) {
+func (s *GRPCProviderServer) PlanResourceChange(ctx context.Context, req *tfprotov5.PlanResourceChangeRequest) (resp *tfprotov5.PlanResourceChangeResponse, err error) {
 	ctx = logging.InitContext(ctx)
-	resp := &tfprotov5.PlanResourceChangeResponse{}
+	resp = &tfprotov5.PlanResourceChangeResponse{}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "PlanResourceChange"))
+		}
+	}()
 
 	res, ok := s.provider.ResourcesMap[req.TypeName]
 	if !ok {
@@ -1355,12 +1385,17 @@ func (s *GRPCProviderServer) PlanResourceChange(ctx context.Context, req *tfprot
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) ApplyResourceChange(ctx context.Context, req *tfprotov5.ApplyResourceChangeRequest) (*tfprotov5.ApplyResourceChangeResponse, error) {
+func (s *GRPCProviderServer) ApplyResourceChange(ctx context.Context, req *tfprotov5.ApplyResourceChangeRequest) (resp *tfprotov5.ApplyResourceChangeResponse, err error) {
 	ctx = logging.InitContext(ctx)
-	resp := &tfprotov5.ApplyResourceChangeResponse{
+	resp = &tfprotov5.ApplyResourceChangeResponse{
 		// Start with the existing state as a fallback
 		NewState: req.PriorState,
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "ApplyResourceChange"))
+		}
+	}()
 
 	res, ok := s.provider.ResourcesMap[req.TypeName]
 	if !ok {
@@ -1993,9 +2028,14 @@ func (s *GRPCProviderServer) MoveResourceState(ctx context.Context, req *tfproto
 	return resp, nil
 }
 
-func (s *GRPCProviderServer) ReadDataSource(ctx context.Context, req *tfprotov5.ReadDataSourceRequest) (*tfprotov5.ReadDataSourceResponse, error) {
+func (s *GRPCProviderServer) ReadDataSource(ctx context.Context, req *tfprotov5.ReadDataSourceRequest) (resp *tfprotov5.ReadDataSourceResponse, err error) {
 	ctx = logging.InitContext(ctx)
-	resp := &tfprotov5.ReadDataSourceResponse{}
+	resp = &tfprotov5.ReadDataSourceResponse{}
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Diagnostics = append(resp.Diagnostics, recoverToDiag(ctx, r, "ReadDataSource"))
+		}
+	}()
 
 	schemaBlock := s.getDatasourceSchemaBlock(req.TypeName)
 

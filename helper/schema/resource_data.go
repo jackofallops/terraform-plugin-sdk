@@ -691,7 +691,9 @@ func (d *ResourceData) get(addr []string, source getSource) getResult {
 		result, err = d.multiReader.ReadFieldMerge(addr, level)
 	}
 	if err != nil {
-		panic(err)
+		if d.panicOnError {
+			panic(err)
+		}
 	}
 
 	// If the result doesn't exist, then we set the value to the zero value

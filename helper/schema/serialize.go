@@ -6,8 +6,11 @@ package schema
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
+
+	"github.com/hashicorp/terraform-plugin-sdk/v2/internal/configs/hcl2shim"
 )
 
 func SerializeValueForHash(buf *bytes.Buffer, val interface{}, schema *Schema) {
@@ -16,29 +19,121 @@ func SerializeValueForHash(buf *bytes.Buffer, val interface{}, schema *Schema) {
 		return
 	}
 
+	if schema == nil {
+		buf.WriteString(fmt.Sprint(val))
+		buf.WriteRune(';')
+		return
+	}
+
+	// Safe handling of UnknownVariableValue sentinel across all types
+	if str, ok := val.(string); ok && str == hcl2shim.UnknownVariableValue {
+		buf.WriteString("~unknown~;")
+		return
+	}
+
 	switch schema.Type {
 	case TypeBool:
-		if val.(bool) {
-			buf.WriteRune('1')
-		} else {
+		switch b := val.(type) {
+		case bool:
+			if b {
+				buf.WriteRune('1')
+			} else {
+				buf.WriteRune('0')
+			}
+		case string:
+			if b == "true" || b == "1" {
+				buf.WriteRune('1')
+			} else {
+				buf.WriteRune('0')
+			}
+		case int:
+			if b != 0 {
+				buf.WriteRune('1')
+			} else {
+				buf.WriteRune('0')
+			}
+		default:
 			buf.WriteRune('0')
 		}
 	case TypeInt:
-		buf.WriteString(strconv.Itoa(val.(int)))
+		switch n := val.(type) {
+		case int:
+			buf.WriteString(strconv.Itoa(n))
+		case int64:
+			buf.WriteString(strconv.FormatInt(n, 10))
+		case int32:
+			buf.WriteString(strconv.Itoa(int(n)))
+		case float64:
+			buf.WriteString(strconv.FormatInt(int64(n), 10))
+		case string:
+			buf.WriteString(n)
+		default:
+			buf.WriteString(fmt.Sprint(val))
+		}
 	case TypeFloat:
-		buf.WriteString(strconv.FormatFloat(val.(float64), 'g', -1, 64))
+		switch f := val.(type) {
+		case float64:
+			buf.WriteString(strconv.FormatFloat(f, 'g', -1, 64))
+		case float32:
+			buf.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 64))
+		case int:
+			buf.WriteString(strconv.Itoa(f))
+		case int64:
+			buf.WriteString(strconv.FormatInt(f, 10))
+		case string:
+			buf.WriteString(f)
+		default:
+			buf.WriteString(fmt.Sprint(val))
+		}
 	case TypeString:
-		buf.WriteString(val.(string))
+		switch s := val.(type) {
+		case string:
+			buf.WriteString(s)
+		default:
+			buf.WriteString(fmt.Sprint(val))
+		}
 	case TypeList:
 		buf.WriteRune('(')
-		l := val.([]interface{})
-		for _, innerVal := range l {
-			serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+		switch l := val.(type) {
+		case []interface{}:
+			for _, innerVal := range l {
+				serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+			}
+		case []string:
+			for _, innerVal := range l {
+				serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+			}
+		case *Set:
+			if l != nil {
+				for _, innerVal := range l.List() {
+					serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+				}
+			}
+		default:
+			v := reflect.ValueOf(val)
+			if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+				for i := 0; i < v.Len(); i++ {
+					serializeCollectionMemberForHash(buf, v.Index(i).Interface(), schema.Elem)
+				}
+			} else {
+				serializeCollectionMemberForHash(buf, val, schema.Elem)
+			}
 		}
 		buf.WriteRune(')')
 	case TypeMap:
-
-		m := val.(map[string]interface{})
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			if sm, ok := val.(map[string]string); ok {
+				m = make(map[string]interface{}, len(sm))
+				for k, v := range sm {
+					m[k] = v
+				}
+			} else {
+				buf.WriteString(fmt.Sprint(val))
+				buf.WriteRune(';')
+				return
+			}
+		}
 		var keys []string
 		for k := range m {
 			keys = append(keys, k)
@@ -56,12 +151,20 @@ func SerializeValueForHash(buf *bytes.Buffer, val interface{}, schema *Schema) {
 			switch innerVal := innerVal.(type) {
 			case int:
 				buf.WriteString(strconv.Itoa(innerVal))
+			case int64:
+				buf.WriteString(strconv.FormatInt(innerVal, 10))
 			case float64:
 				buf.WriteString(strconv.FormatFloat(innerVal, 'g', -1, 64))
 			case string:
 				buf.WriteString(innerVal)
+			case bool:
+				if innerVal {
+					buf.WriteRune('1')
+				} else {
+					buf.WriteRune('0')
+				}
 			default:
-				panic(fmt.Sprintf("unknown value type in TypeMap %T", innerVal))
+				buf.WriteString(fmt.Sprint(innerVal))
 			}
 
 			buf.WriteRune(';')
@@ -69,18 +172,35 @@ func SerializeValueForHash(buf *bytes.Buffer, val interface{}, schema *Schema) {
 		buf.WriteRune(']')
 	case TypeSet:
 		buf.WriteRune('{')
-		s := val.(*Set)
-		for _, innerVal := range s.List() {
-			serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+		switch s := val.(type) {
+		case *Set:
+			if s != nil {
+				for _, innerVal := range s.List() {
+					serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+				}
+			}
+		case []interface{}:
+			for _, innerVal := range s {
+				serializeCollectionMemberForHash(buf, innerVal, schema.Elem)
+			}
+		default:
+			v := reflect.ValueOf(val)
+			if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+				for i := 0; i < v.Len(); i++ {
+					serializeCollectionMemberForHash(buf, v.Index(i).Interface(), schema.Elem)
+				}
+			} else {
+				serializeCollectionMemberForHash(buf, val, schema.Elem)
+			}
 		}
 		buf.WriteRune('}')
 	default:
-		panic("unknown schema type to serialize")
+		buf.WriteString(fmt.Sprint(val))
 	}
 	buf.WriteRune(';')
 }
 
-// SerializeValueForHash appends a serialization of the given resource config
+// SerializeResourceForHash appends a serialization of the given resource config
 // to the given buffer, guaranteeing deterministic results given the same value
 // and schema.
 //
@@ -88,14 +208,21 @@ func SerializeValueForHash(buf *bytes.Buffer, val interface{}, schema *Schema) {
 // to hash complex substructures when used in sets, and so the serialization
 // is not reversible.
 func SerializeResourceForHash(buf *bytes.Buffer, val interface{}, resource *Resource) {
-	if val == nil {
+	if val == nil || resource == nil {
+		return
+	}
+	m, ok := val.(map[string]interface{})
+	if !ok {
+		buf.WriteString(fmt.Sprint(val))
 		return
 	}
 	sm := resource.SchemaMap()
-	m := val.(map[string]interface{})
 	var keys []string
 	allComputed := true
 	for k, v := range sm {
+		if v == nil {
+			continue
+		}
 		if v.Optional || v.Required {
 			allComputed = false
 		}
@@ -105,6 +232,9 @@ func SerializeResourceForHash(buf *bytes.Buffer, val interface{}, resource *Reso
 	sort.Strings(keys)
 	for _, k := range keys {
 		innerSchema := sm[k]
+		if innerSchema == nil {
+			continue
+		}
 		// Skip attributes that are not user-provided. Computed attributes
 		// do not contribute to the hash since their ultimate value cannot
 		// be known at plan/diff time.
@@ -128,6 +258,6 @@ func serializeCollectionMemberForHash(buf *bytes.Buffer, val interface{}, elem i
 		SerializeResourceForHash(buf, val, tElem)
 		buf.WriteString(">;")
 	default:
-		panic(fmt.Sprintf("invalid element type: %T", tElem))
+		buf.WriteString(fmt.Sprint(val))
 	}
 }

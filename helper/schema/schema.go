@@ -1593,14 +1593,24 @@ func (m schemaMap) diffSet(
 		return nil
 	}
 
-	if o == nil {
-		o = schema.ZeroValue().(*Set)
+	setZero := schema.ZeroValue().(*Set)
+	var os *Set
+	if s, ok := o.(*Set); ok {
+		os = s
+	} else if sl, ok := o.([]interface{}); ok {
+		os = NewSet(setZero.F, sl)
+	} else {
+		os = setZero
 	}
-	if n == nil {
-		n = schema.ZeroValue().(*Set)
+
+	var ns *Set
+	if s, ok := n.(*Set); ok {
+		ns = s
+	} else if sl, ok := n.([]interface{}); ok {
+		ns = NewSet(setZero.F, sl)
+	} else {
+		ns = setZero
 	}
-	os := o.(*Set)
-	ns := n.(*Set)
 
 	// If the new value was set, compare the listCode's to determine if
 	// the two are equal. Comparing listCode's instead of the actual values
@@ -1628,13 +1638,24 @@ func (m schemaMap) diffSet(
 		// If # already exists, equals 0 and no new set is supplied, there
 		// is nothing to record in the diff
 		count, ok := d.GetOk(k + ".#")
-		if ok && count.(int) == 0 && !nSet && !computedSet {
+		countInt := 0
+		if ok {
+			switch c := count.(type) {
+			case int:
+				countInt = c
+			case string:
+				countInt, _ = strconv.Atoi(c)
+			case int64:
+				countInt = int(c)
+			}
+		}
+		if ok && countInt == 0 && !nSet && !computedSet {
 			return nil
 		}
 
 		// Set the count but make sure that if # does not exist, we don't
 		// use the zeroed value
-		countStr := strconv.Itoa(count.(int))
+		countStr := strconv.Itoa(countInt)
 		if !ok {
 			countStr = ""
 		}

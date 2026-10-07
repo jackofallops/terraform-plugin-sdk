@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strconv"
 
 	"github.com/hashicorp/go-cty/cty"
@@ -832,7 +833,17 @@ type StateUpgradeFunc func(ctx context.Context, rawState map[string]interface{},
 // See Resource documentation.
 type CustomizeDiffFunc func(context.Context, *ResourceDiff, interface{}) error
 
-func (r *Resource) create(ctx context.Context, d *ResourceData, meta interface{}) diag.Diagnostics {
+func (r *Resource) create(ctx context.Context, d *ResourceData, meta interface{}) (diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in resource create: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
 	if r.Create != nil {
 		if err := r.Create(d, meta); err != nil {
 			return diag.FromErr(err)
@@ -849,7 +860,17 @@ func (r *Resource) create(ctx context.Context, d *ResourceData, meta interface{}
 	return r.CreateContext(ctx, d, meta)
 }
 
-func (r *Resource) read(ctx context.Context, d *ResourceData, meta interface{}) diag.Diagnostics {
+func (r *Resource) read(ctx context.Context, d *ResourceData, meta interface{}) (diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in resource read: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
 	if r.Read != nil {
 		if err := r.Read(d, meta); err != nil {
 			return diag.FromErr(err)
@@ -866,7 +887,17 @@ func (r *Resource) read(ctx context.Context, d *ResourceData, meta interface{}) 
 	return r.ReadContext(ctx, d, meta)
 }
 
-func (r *Resource) update(ctx context.Context, d *ResourceData, meta interface{}) diag.Diagnostics {
+func (r *Resource) update(ctx context.Context, d *ResourceData, meta interface{}) (diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in resource update: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
 	if r.Update != nil {
 		if err := r.Update(d, meta); err != nil {
 			return diag.FromErr(err)
@@ -883,7 +914,17 @@ func (r *Resource) update(ctx context.Context, d *ResourceData, meta interface{}
 	return r.UpdateContext(ctx, d, meta)
 }
 
-func (r *Resource) delete(ctx context.Context, d *ResourceData, meta interface{}) diag.Diagnostics {
+func (r *Resource) delete(ctx context.Context, d *ResourceData, meta interface{}) (diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in resource delete: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
 	if r.Delete != nil {
 		if err := r.Delete(d, meta); err != nil {
 			return diag.FromErr(err)
@@ -905,7 +946,17 @@ func (r *Resource) Apply(
 	ctx context.Context,
 	s *terraform.InstanceState,
 	d *terraform.InstanceDiff,
-	meta interface{}) (*terraform.InstanceState, diag.Diagnostics) {
+	meta interface{}) (state *terraform.InstanceState, diags diag.Diagnostics) {
+	state = s
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in Resource.Apply: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
 	schema := schemaMapWithIdentity{r.SchemaMap(), r.Identity.SchemaMap()}
 	data, err := schema.Data(s, d)
 	if err != nil {
@@ -939,8 +990,6 @@ func (r *Resource) Apply(
 		// it doesn't hurt to be safe in this case.
 		s = new(terraform.InstanceState)
 	}
-
-	var diags diag.Diagnostics
 
 	if d.Destroy || d.RequiresNew() {
 		if s.ID != "" {
@@ -999,16 +1048,21 @@ func (r *Resource) Diff(
 	ctx context.Context,
 	s *terraform.InstanceState,
 	c *terraform.ResourceConfig,
-	meta interface{}) (*terraform.InstanceDiff, error) {
+	meta interface{}) (instanceDiff *terraform.InstanceDiff, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("internal provider panic in Resource.Diff: %v\n%s", p, string(debug.Stack()))
+		}
+	}()
 
 	t := &ResourceTimeout{}
-	err := t.ConfigDecode(r, c)
+	err = t.ConfigDecode(r, c)
 
 	if err != nil {
 		return nil, fmt.Errorf("[ERR] Error decoding timeout: %s", err)
 	}
 
-	instanceDiff, err := schemaMap(r.SchemaMap()).Diff(ctx, s, c, r.CustomizeDiff, meta, true)
+	instanceDiff, err = schemaMap(r.SchemaMap()).Diff(ctx, s, c, r.CustomizeDiff, meta, true)
 	if err != nil {
 		return instanceDiff, err
 	}
@@ -1028,10 +1082,15 @@ func (r *Resource) SimpleDiff(
 	ctx context.Context,
 	s *terraform.InstanceState,
 	c *terraform.ResourceConfig,
-	meta interface{}) (*terraform.InstanceDiff, error) {
+	meta interface{}) (instanceDiff *terraform.InstanceDiff, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("internal provider panic in Resource.SimpleDiff: %v\n%s", p, string(debug.Stack()))
+		}
+	}()
 
 	// TODO: figure out if it makes sense to be able to set identity in CustomizeDiff at all
-	instanceDiff, err := schemaMapWithIdentity{r.SchemaMap(), r.Identity.SchemaMap()}.Diff(ctx, s, c, r.CustomizeDiff, meta, false)
+	instanceDiff, err = schemaMapWithIdentity{r.SchemaMap(), r.Identity.SchemaMap()}.Diff(ctx, s, c, r.CustomizeDiff, meta, false)
 	if err != nil {
 		return instanceDiff, err
 	}
@@ -1056,8 +1115,18 @@ func (r *Resource) SimpleDiff(
 }
 
 // Validate validates the resource configuration against the schema.
-func (r *Resource) Validate(c *terraform.ResourceConfig) diag.Diagnostics {
-	diags := schemaMap(r.SchemaMap()).Validate(c)
+func (r *Resource) Validate(c *terraform.ResourceConfig) (diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in Resource.Validate: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
+	diags = schemaMap(r.SchemaMap()).Validate(c)
 
 	if r.DeprecationMessage != "" {
 		diags = append(diags, diag.Diagnostic{
@@ -1076,7 +1145,17 @@ func (r *Resource) ReadDataApply(
 	ctx context.Context,
 	d *terraform.InstanceDiff,
 	meta interface{},
-) (*terraform.InstanceState, diag.Diagnostics) {
+) (state *terraform.InstanceState, diags diag.Diagnostics) {
+	defer func() {
+		if p := recover(); p != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity: diag.Error,
+				Summary:  fmt.Sprintf("Internal provider panic in Resource.ReadDataApply: %v", p),
+				Detail:   fmt.Sprintf("Panic: %v\n\nStack trace:\n%s", p, string(debug.Stack())),
+			})
+		}
+	}()
+
 	// Data sources are always built completely from scratch
 	// on each read, so the source state is always nil.
 	data, err := schemaMap(r.SchemaMap()).Data(nil, d)
@@ -1085,10 +1164,10 @@ func (r *Resource) ReadDataApply(
 	}
 
 	logging.HelperSchemaTrace(ctx, "Calling downstream")
-	diags := r.read(ctx, data, meta)
+	diags = r.read(ctx, data, meta)
 	logging.HelperSchemaTrace(ctx, "Called downstream")
 
-	state := data.State()
+	state = data.State()
 	if state != nil && state.ID == "" {
 		// Data sources can set an ID if they want, but they aren't
 		// required to; we'll provide a placeholder if they don't,

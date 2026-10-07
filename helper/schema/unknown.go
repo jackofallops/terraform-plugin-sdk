@@ -4,8 +4,6 @@
 package schema
 
 import (
-	"fmt"
-
 	"github.com/hashicorp/go-cty/cty"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/internal/configs/configschema"
@@ -45,7 +43,15 @@ func SetUnknowns(val cty.Value, schema *configschema.Block) cty.Value {
 	newVals := make(map[string]cty.Value)
 
 	for name, attr := range schema.Attributes {
-		v := valMap[name]
+		v, exists := valMap[name]
+		if !exists || v == cty.NilVal {
+			if attr.Computed {
+				newVals[name] = cty.UnknownVal(attr.Type)
+			} else {
+				newVals[name] = cty.NullVal(attr.Type)
+			}
+			continue
+		}
 
 		if attr.Computed && v.IsNull() {
 			newVals[name] = cty.UnknownVal(attr.Type)
@@ -56,9 +62,13 @@ func SetUnknowns(val cty.Value, schema *configschema.Block) cty.Value {
 	}
 
 	for name, blockS := range schema.BlockTypes {
-		blockVal := valMap[name]
-		if blockVal.IsNull() || !blockVal.IsKnown() {
-			newVals[name] = blockVal
+		blockVal, exists := valMap[name]
+		if !exists || blockVal == cty.NilVal || blockVal.IsNull() || !blockVal.IsKnown() {
+			if exists && blockVal != cty.NilVal {
+				newVals[name] = blockVal
+			} else {
+				newVals[name] = cty.NullVal(blockS.Block.ImpliedType())
+			}
 			continue
 		}
 
@@ -87,7 +97,18 @@ func SetUnknowns(val cty.Value, schema *configschema.Block) cty.Value {
 				case 0:
 					newVals[name] = cty.SetValEmpty(blockElementType)
 				default:
-					newVals[name] = cty.SetVal(newListVals)
+					hasUnknown := false
+					for _, item := range newListVals {
+						if !item.IsKnown() {
+							hasUnknown = true
+							break
+						}
+					}
+					if hasUnknown {
+						newVals[name] = cty.UnknownVal(blockValType)
+					} else {
+						newVals[name] = cty.SetVal(newListVals)
+					}
 				}
 			case blockValType.IsListType():
 				switch len(newListVals) {
@@ -127,7 +148,7 @@ func SetUnknowns(val cty.Value, schema *configschema.Block) cty.Value {
 			}
 
 		default:
-			panic(fmt.Sprintf("failed to set unknown values for nested block %q:%#v", name, blockValType))
+			newVals[name] = blockVal
 		}
 	}
 
