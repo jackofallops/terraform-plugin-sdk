@@ -261,6 +261,26 @@ type Schema struct {
 	// underlying structure and type information of the Elem field.
 	Set SchemaSetFunc
 
+	// SortKeys defines ordered attribute names used to sort TypeList elements canonically.
+	// When configured:
+	//   - Elements are sorted lexicographically by compound key across all stages:
+	//     prior state, configuration, proposed state, planned state, and new state.
+	//   - Elements must be *Resource (nested blocks).
+	//   - Each referenced attribute must be a Required primitive attribute.
+	//   - List elements must have unique compound SortKeys values. Duplicate items sharing
+	//     the same sort keys will fail validation during plan.
+	//   - SortKeys cannot be configured simultaneously with SortFunc.
+	//
+	// When SortKeys is defined, the engine automatically aligns prior state attributes
+	// by compound key across additions, removals, and reordering. Server-computed
+	// attributes (such as an assigned "id") automatically migrate with their logical block,
+	// eliminating positional attribute cross-wiring.
+	SortKeys []string
+
+	// SortFunc defines a custom comparison function used to sort TypeList elements.
+	// It cannot be configured simultaneously with SortKeys.
+	SortFunc SchemaSortFunc
+
 	// ComputedWhen is a set of queries on the configuration. Whenever any
 	// of these things is changed, it will require a recompute (this requires
 	// that Computed is set to true).
@@ -478,6 +498,10 @@ func MultiEnvDefaultFunc(ks []string, dv interface{}) SchemaDefaultFunc {
 // SchemaSetFunc is a function that must return a unique ID for the given
 // element. This unique ID is used to store the element in a hash.
 type SchemaSetFunc func(interface{}) int
+
+// SchemaSortFunc is a function used to compare two TypeList elements for ordering.
+// It returns true if element a should sort before element b.
+type SchemaSortFunc func(a, b interface{}) bool
 
 // SchemaStateFunc is a function used to convert some type to a string
 // to be stored in the state.
@@ -722,6 +746,12 @@ func (m schemaMapWithIdentity) Diff(
 		result.RawState = s.RawState
 		result.RawPlan = s.RawPlan
 		result.Identity = s.Identity
+	}
+
+	// Realign prior state flatmap attributes for any TypeList with SortKeys so
+	// that computed and unchanged attributes migrate with their logical block.
+	if s != nil && c != nil {
+		realignPriorStateForSortKeys(m.schemaMap, s, c)
 	}
 
 	d := &ResourceData{
@@ -1122,6 +1152,52 @@ func (m schemaMap) internalValidate(topSchemaMap schemaMap, attrsOnly bool) erro
 			}
 		}
 
+		if v.Type != TypeList {
+			if len(v.SortKeys) > 0 {
+				return fmt.Errorf("%s: SortKeys can only be set for TypeList", k)
+			}
+			if v.SortFunc != nil {
+				return fmt.Errorf("%s: SortFunc can only be set for TypeList", k)
+			}
+		} else {
+			if len(v.SortKeys) > 0 && v.SortFunc != nil {
+				return fmt.Errorf("%s: SortKeys and SortFunc cannot both be set", k)
+			}
+			if len(v.SortKeys) > 0 {
+				childRes, ok := v.Elem.(*Resource)
+				if !ok {
+					return fmt.Errorf("%s: SortKeys requires Elem to be *Resource", k)
+				}
+				childSchemaMap := childRes.SchemaMap()
+				seenKeys := make(map[string]bool, len(v.SortKeys))
+				for _, sortKey := range v.SortKeys {
+					if sortKey == "" {
+						return fmt.Errorf("%s: SortKeys cannot contain empty strings", k)
+					}
+					if seenKeys[sortKey] {
+						return fmt.Errorf("%s: SortKeys contains duplicate key %q", k, sortKey)
+					}
+					seenKeys[sortKey] = true
+
+					childSchema, exists := childSchemaMap[sortKey]
+					if !exists {
+						return fmt.Errorf("%s: SortKeys references attribute %q which does not exist in Elem schema", k, sortKey)
+					}
+
+					if !childSchema.Required {
+						return fmt.Errorf("%s: SortKeys attribute %q must have Required: true", k, sortKey)
+					}
+
+					switch childSchema.Type {
+					case TypeString, TypeInt, TypeFloat, TypeBool:
+						// valid primitive
+					default:
+						return fmt.Errorf("%s: SortKeys attribute %q must be a primitive type (String, Int, Float, or Bool)", k, sortKey)
+					}
+				}
+			}
+		}
+
 		if v.Type == TypeMap && v.Elem != nil {
 			if v.WriteOnly {
 				return fmt.Errorf("%s: WriteOnly is not valid for maps", k)
@@ -1364,8 +1440,56 @@ func (m schemaMap) diffList(
 	if s, ok := n.(*Set); ok {
 		n = s.List()
 	}
-	os := o.([]interface{})
-	vs := n.([]interface{})
+	var os []interface{}
+	switch s := o.(type) {
+	case []interface{}:
+		os = s
+	case []string:
+		os = make([]interface{}, len(s))
+		for i, v := range s {
+			os[i] = v
+		}
+	default:
+		v := reflect.ValueOf(o)
+		if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+			os = make([]interface{}, v.Len())
+			for i := 0; i < v.Len(); i++ {
+				os[i] = v.Index(i).Interface()
+			}
+		} else {
+			os = []interface{}{}
+		}
+	}
+
+	var vs []interface{}
+	switch s := n.(type) {
+	case []interface{}:
+		vs = s
+	case []string:
+		vs = make([]interface{}, len(s))
+		for i, v := range s {
+			vs[i] = v
+		}
+	default:
+		v := reflect.ValueOf(n)
+		if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+			vs = make([]interface{}, v.Len())
+			for i := 0; i < v.Len(); i++ {
+				vs[i] = v.Index(i).Interface()
+			}
+		} else {
+			vs = []interface{}{}
+		}
+	}
+
+	if len(schema.SortKeys) > 0 {
+		if err := validateSortKeysUniqueness(vs, schema.SortKeys); err != nil {
+			return fmt.Errorf("%s: %w", k, err)
+		}
+	}
+
+	os = schema.canonicalizeList(os)
+	vs = schema.canonicalizeList(vs)
 
 	// If the new value was set, and the two are equal, then we're done.
 	// We have to do this check here because sets might be NOT
@@ -2127,6 +2251,17 @@ func (m schemaMap) validateList(
 	raws := make([]interface{}, rawV.Len())
 	for i := range raws {
 		raws[i] = rawV.Index(i).Interface()
+	}
+
+	if len(schema.SortKeys) > 0 {
+		if err := validateSortKeysUniqueness(raws, schema.SortKeys); err != nil {
+			diags = append(diags, diag.Diagnostic{
+				Severity:      diag.Error,
+				Summary:       "Duplicate list item",
+				Detail:        fmt.Sprintf("Attribute %s: %s", k, err),
+				AttributePath: path,
+			})
+		}
 	}
 
 	for i, raw := range raws {

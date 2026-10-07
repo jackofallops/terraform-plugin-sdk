@@ -34,25 +34,26 @@ func (r *ConfigFieldReader) ReadField(address []string) (FieldReadResult, error)
 
 func (r *ConfigFieldReader) readField(
 	address []string, nested bool) (FieldReadResult, error) {
+	// copy address so modifications do not affect caller
+	address = append([]string(nil), address...)
+
 	schemaList := addrToSchema(address, r.Schema)
 	if len(schemaList) == 0 {
 		return FieldReadResult{}, nil
 	}
 
 	if !nested {
-		// If we have a set anywhere in the address, then we need to
-		// read that set out in order and actually replace that part of
-		// the address with the real list index. i.e. set.50 might actually
-		// map to set.12 in the config, since it is in list order in the
-		// config, not indexed by set value.
+		// If we have a set or sorted list anywhere in the address, then we need to
+		// read that collection out in order and actually replace that part of
+		// the address with the real list index.
 		for i, v := range schemaList {
-			// Sets are the only thing that cause this issue.
-			if v.Type != TypeSet {
+			isSortedList := v.Type == TypeList && (len(v.SortKeys) > 0 || v.SortFunc != nil)
+			if v.Type != TypeSet && !isSortedList {
 				continue
 			}
 
 			// If we're at the end of the list, then we don't have to worry
-			// about this because we're just requesting the whole set.
+			// about this because we're just requesting the whole set or list.
 			if i == len(schemaList)-1 {
 				continue
 			}
@@ -62,15 +63,23 @@ func (r *ConfigFieldReader) readField(
 				continue
 			}
 
-			indexMap, ok := r.indexMaps[strings.Join(address[:i+1], ".")]
+			addrKey := strings.Join(address[:i+1], ".")
+			indexMap, ok := r.indexMaps[addrKey]
 			if !ok {
-				// Get the set so we can get the index map that tells us the
-				// mapping of the hash code to the list index
-				_, err := r.readSet(address[:i+1], v)
-				if err != nil {
-					return FieldReadResult{}, err
+				if v.Type == TypeSet {
+					// Get the set so we can get the index map that tells us the
+					// mapping of the hash code to the list index
+					_, err := r.readSet(address[:i+1], v)
+					if err != nil {
+						return FieldReadResult{}, err
+					}
+				} else {
+					_, err := r.readSortedList(address[:i+1], v)
+					if err != nil {
+						return FieldReadResult{}, err
+					}
 				}
-				indexMap = r.indexMaps[strings.Join(address[:i+1], ".")]
+				indexMap = r.indexMaps[addrKey]
 			}
 
 			index, ok := indexMap[address[i+1]]
@@ -103,6 +112,9 @@ func (r *ConfigFieldReader) readField(
 	case TypeBool, TypeFloat, TypeInt, TypeString:
 		return r.readPrimitive(k, schema)
 	case TypeList:
+		if len(schema.SortKeys) > 0 || schema.SortFunc != nil {
+			return r.readSortedList(address, schema)
+		}
 		return readListField(&nestedConfigFieldReader{r}, address)
 	case TypeMap:
 		return r.readMap(k, schema)
@@ -293,6 +305,40 @@ func (r *ConfigFieldReader) readSet(
 	return FieldReadResult{
 		Value:  set,
 		Exists: true,
+	}, nil
+}
+
+func (r *ConfigFieldReader) readSortedList(
+	address []string, schema *Schema) (FieldReadResult, error) {
+	if r.indexMaps == nil {
+		r.indexMaps = make(map[string]map[string]int)
+	}
+
+	raw, err := readListField(&nestedConfigFieldReader{r}, address)
+	if err != nil {
+		return FieldReadResult{}, err
+	}
+	if !raw.Exists || raw.Computed {
+		return raw, nil
+	}
+
+	vs, ok := raw.Value.([]interface{})
+	if !ok || len(vs) == 0 {
+		return raw, nil
+	}
+
+	sortedVs, perm := schema.canonicalizeListWithPermutation(vs)
+	indexMap := make(map[string]int, len(perm))
+	for sortedIdx, origIdx := range perm {
+		indexMap[strconv.Itoa(sortedIdx)] = origIdx
+	}
+
+	r.indexMaps[strings.Join(address, ".")] = indexMap
+
+	return FieldReadResult{
+		Value:    sortedVs,
+		Exists:   true,
+		Computed: false,
 	}, nil
 }
 

@@ -27,7 +27,16 @@ func (r *MapFieldReader) ReadField(address []string) (FieldReadResult, error) {
 	case TypeBool, TypeInt, TypeFloat, TypeString:
 		return r.readPrimitive(address, schema)
 	case TypeList:
-		return readListField(r, address)
+		res, err := readListField(r, address)
+		if err != nil {
+			return res, err
+		}
+		if res.Value != nil && (len(schema.SortKeys) > 0 || schema.SortFunc != nil) {
+			if vs, ok := res.Value.([]interface{}); ok {
+				res.Value = schema.canonicalizeList(vs)
+			}
+		}
+		return res, nil
 	case TypeMap:
 		return r.readMap(k, schema)
 	case TypeSet:

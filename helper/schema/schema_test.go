@@ -5450,6 +5450,180 @@ func TestSchemaMap_InternalValidate(t *testing.T) {
 
 }
 
+func TestSchemaMap_InternalValidate_SortKeys(t *testing.T) {
+	cases := map[string]struct {
+		In  map[string]*Schema
+		Err bool
+	}{
+		"valid SortKeys with required primitive fields": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"direction", "priority"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"direction": {Type: TypeString, Required: true},
+							"priority":  {Type: TypeInt, Required: true},
+							"desc":      {Type: TypeString, Optional: true},
+						},
+					},
+				},
+			},
+			Err: false,
+		},
+		"SortKeys on TypeSet": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeSet,
+					Optional: true,
+					SortKeys: []string{"name"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"name": {Type: TypeString, Required: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys combined with SortFunc": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"name"},
+					SortFunc: func(a, b interface{}) bool { return true },
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"name": {Type: TypeString, Required: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys with non-Resource Elem": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"name"},
+					Elem:     &Schema{Type: TypeString},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys with duplicate key": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"name", "name"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"name": {Type: TypeString, Required: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys referencing non-existent key": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"nonexistent"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"name": {Type: TypeString, Required: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys referencing Optional key": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"name"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"name": {Type: TypeString, Optional: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"SortKeys referencing Computed key": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"id"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"id": {Type: TypeString, Computed: true},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+		"valid SortKeys with compound required keys": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"direction", "priority"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"direction": {Type: TypeString, Required: true},
+							"priority":  {Type: TypeInt, Required: true},
+						},
+					},
+				},
+			},
+			Err: false,
+		},
+		"SortKeys referencing non-primitive key": {
+			In: map[string]*Schema{
+				"rules": {
+					Type:     TypeList,
+					Optional: true,
+					SortKeys: []string{"sublist"},
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"sublist": {
+								Type:     TypeList,
+								Required: true,
+								Elem:     &Schema{Type: TypeString},
+							},
+						},
+					},
+				},
+			},
+			Err: true,
+		},
+	}
+
+	for tn, tc := range cases {
+		t.Run(tn, func(t *testing.T) {
+			err := schemaMap(tc.In).InternalValidate(nil)
+			if err != nil != tc.Err {
+				if tc.Err {
+					t.Fatalf("%q: Expected error did not occur", tn)
+				}
+				t.Fatalf("%q: Unexpected error: %s", tn, err)
+			}
+		})
+	}
+}
+
 func TestSchemaMap_DiffSuppress(t *testing.T) {
 	cases := map[string]struct {
 		Schema       map[string]*Schema

@@ -103,7 +103,7 @@ func (w *MapFieldWriter) set(addr []string, value interface{}) error {
 	case TypeBool, TypeInt, TypeFloat, TypeString:
 		return w.setPrimitive(addr, value, schema)
 	case TypeList:
-		return w.setList(addr, value)
+		return w.setList(addr, value, schema)
 	case TypeMap:
 		return w.setMap(addr, value)
 	case TypeSet:
@@ -117,7 +117,8 @@ func (w *MapFieldWriter) set(addr []string, value interface{}) error {
 
 func (w *MapFieldWriter) setList(
 	addr []string,
-	v interface{}) error {
+	v interface{},
+	schema *Schema) error {
 	k := strings.Join(addr, ".")
 	setElement := func(idx string, value interface{}) error {
 		addrCopy := make([]string, len(addr), len(addr)+1)
@@ -129,6 +130,14 @@ func (w *MapFieldWriter) setList(
 	if err := mapstructure.Decode(v, &vs); err != nil {
 		return fmt.Errorf("%s: %s", k, err)
 	}
+
+	if schema != nil && len(schema.SortKeys) > 0 {
+		if err := validateSortKeysUniqueness(vs, schema.SortKeys); err != nil {
+			return fmt.Errorf("%s: %w", k, err)
+		}
+	}
+
+	vs = schema.canonicalizeList(vs)
 
 	// Wipe the set from the current writer prior to writing if it exists.
 	// Multiple writes to the same layer is a lot safer for lists than sets due

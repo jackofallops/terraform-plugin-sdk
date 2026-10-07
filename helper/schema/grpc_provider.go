@@ -1073,6 +1073,8 @@ func (s *GRPCProviderServer) PlanResourceChange(ctx context.Context, req *tfprot
 		return resp, nil
 	}
 
+	proposedNewStateVal = realignProposedNewStateForSortKeys(res.SchemaMap(), proposedNewStateVal, priorStateVal, configVal)
+
 	priorState, err := res.ShimInstanceStateFromValue(priorStateVal)
 	if err != nil {
 		resp.Diagnostics = convert.AppendProtoDiag(ctx, resp.Diagnostics, err)
@@ -1502,6 +1504,11 @@ func (s *GRPCProviderServer) ApplyResourceChange(ctx context.Context, req *tfpro
 			return resp, nil
 		}
 		priorState.ProviderMeta = providerSchemaVal
+	}
+
+	if priorState != nil && plannedStateVal.IsKnown() && !plannedStateVal.IsNull() {
+		cfgPlanned := terraform.NewResourceConfigShimmed(plannedStateVal, schemaBlock)
+		realignPriorStateForSortKeys(res.SchemaMap(), priorState, cfgPlanned)
 	}
 
 	newInstanceState, diags := res.Apply(ctx, priorState, diff, s.provider.Meta())

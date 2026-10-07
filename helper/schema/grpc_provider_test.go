@@ -8284,6 +8284,159 @@ func TestPlanResourceChange_bigint(t *testing.T) {
 	}
 }
 
+func TestPlanResourceChange_TypeList_SortKeys_ReorderedProposedNewState(t *testing.T) {
+	r := &Resource{
+		Schema: map[string]*Schema{
+			"http_listener": {
+				Type:     TypeList,
+				Optional: true,
+				SortKeys: []string{"name"},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"name": {Type: TypeString, Required: true},
+						"id":   {Type: TypeString, Computed: true},
+					},
+				},
+			},
+		},
+	}
+
+	server := NewGRPCProviderServer(&Provider{
+		ResourcesMap: map[string]*Resource{
+			"test": r,
+		},
+	})
+
+	coreSchema := r.CoreConfigSchema()
+
+	// PriorState: listeners 1, 2, 4 in canonical order with matching IDs
+	priorVal := cty.ObjectVal(map[string]cty.Value{
+		"id": cty.StringVal("res-id"),
+		"http_listener": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-1"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-1"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-2"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-2"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-4"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-4"),
+			}),
+		}),
+	})
+	priorBytes, err := msgpack.Marshal(priorVal, coreSchema.ImpliedType())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Config: reordered in HCL as 4, 1, 2
+	configVal := cty.ObjectVal(map[string]cty.Value{
+		"id": cty.StringVal("res-id"),
+		"http_listener": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-4"),
+				"id":   cty.NullVal(cty.String),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-1"),
+				"id":   cty.NullVal(cty.String),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-2"),
+				"id":   cty.NullVal(cty.String),
+			}),
+		}),
+	})
+	configBytes, err := msgpack.Marshal(configVal, coreSchema.ImpliedType())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ProposedNewState from Core: Core naively paired config[i] with prior[i],
+	// attaching the wrong IDs
+	proposedVal := cty.ObjectVal(map[string]cty.Value{
+		"id": cty.StringVal("res-id"),
+		"http_listener": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-4"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-1"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-1"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-2"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal("http-lstn-2"),
+				"id":   cty.StringVal("/sub/listeners/http-lstn-4"),
+			}),
+		}),
+	})
+	proposedBytes, err := msgpack.Marshal(proposedVal, coreSchema.ImpliedType())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testReq := &tfprotov5.PlanResourceChangeRequest{
+		TypeName: "test",
+		PriorState: &tfprotov5.DynamicValue{
+			MsgPack: priorBytes,
+		},
+		ProposedNewState: &tfprotov5.DynamicValue{
+			MsgPack: proposedBytes,
+		},
+		Config: &tfprotov5.DynamicValue{
+			MsgPack: configBytes,
+		},
+	}
+
+	resp, err := server.PlanResourceChange(context.Background(), testReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Diagnostics != nil {
+		for _, diag := range resp.Diagnostics {
+			if diag.Severity == tfprotov5.DiagnosticSeverityError {
+				t.Fatalf("Plan error: %s: %s", diag.Summary, diag.Detail)
+			}
+		}
+	}
+
+	plannedVal, err := msgpack.Unmarshal(resp.PlannedState.MsgPack, coreSchema.ImpliedType())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plannedList := plannedVal.GetAttr("http_listener").AsValueSlice()
+	if len(plannedList) != 3 {
+		t.Fatalf("expected 3 planned listeners, got %d", len(plannedList))
+	}
+
+	expected := []struct {
+		name string
+		id   string
+	}{
+		{"http-lstn-1", "/sub/listeners/http-lstn-1"},
+		{"http-lstn-2", "/sub/listeners/http-lstn-2"},
+		{"http-lstn-4", "/sub/listeners/http-lstn-4"},
+	}
+
+	for i, exp := range expected {
+		elem := plannedList[i]
+		actualName := elem.GetAttr("name").AsString()
+		actualID := elem.GetAttr("id").AsString()
+
+		if actualName != exp.name {
+			t.Errorf("at index %d: expected planned name %q, got %q", i, exp.name, actualName)
+		}
+		if actualID != exp.id {
+			t.Errorf("at index %d (%s): expected planned id %q, got %q", i, exp.name, exp.id, actualID)
+		}
+	}
+}
+
 func TestApplyResourceChange(t *testing.T) {
 	t.Parallel()
 

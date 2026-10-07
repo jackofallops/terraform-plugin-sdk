@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -2417,3 +2418,395 @@ func TestResourceDiffGetRawConfigAt(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceDiff_TypeList_SortKeys(t *testing.T) {
+	ruleSchema := &Resource{
+		Schema: map[string]*Schema{
+			"rules": {
+				Type:     TypeList,
+				Optional: true,
+				SortKeys: []string{"direction", "priority"},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"direction":   {Type: TypeString, Required: true},
+						"priority":    {Type: TypeInt, Required: true},
+						"name":        {Type: TypeString, Required: true},
+						"description": {Type: TypeString, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	// Prior state has rules in canonical order:
+	// Index 0: Inbound, 100, "rule1", "old desc"
+	// Index 1: Outbound, 200, "rule2", "desc2"
+	state := &terraform.InstanceState{
+		ID: "nsg-123",
+		Attributes: map[string]string{
+			"rules.#":              "2",
+			"rules.0.direction":    "Inbound",
+			"rules.0.priority":     "100",
+			"rules.0.name":         "rule1",
+			"rules.0.description":  "old desc",
+			"rules.1.direction":    "Outbound",
+			"rules.1.priority":     "200",
+			"rules.1.name":         "rule2",
+			"rules.1.description":  "desc2",
+		},
+	}
+
+	// Config supplies rules in REVERSED order, but modifies description of rule1
+	config := testConfig(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"direction":   "Outbound",
+				"priority":    200,
+				"name":        "rule2",
+				"description": "desc2",
+			},
+			map[string]interface{}{
+				"direction":   "Inbound",
+				"priority":    100,
+				"name":        "rule1",
+				"description": "new desc", // Changed!
+			},
+		},
+	})
+
+	diff, err := ruleSchema.Diff(context.Background(), state, config, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	if diff == nil {
+		t.Fatal("expected non-nil diff")
+	}
+
+	// Because of SortKeys: []string{"direction", "priority"},
+	// rule1 remains at index 0 despite being listed second in config!
+	// It should produce an in-place diff at rules.0.description
+	// and NO diff for rule2 or the list count.
+	expectedDiffKey := "rules.0.description"
+	attrDiff, ok := diff.Attributes[expectedDiffKey]
+	if !ok {
+		t.Fatalf("expected in-place diff at %q, got: %#v", expectedDiffKey, diff.Attributes)
+	}
+	if attrDiff.Old != "old desc" || attrDiff.New != "new desc" {
+		t.Fatalf("expected Old: 'old desc', New: 'new desc', got Old: %q, New: %q", attrDiff.Old, attrDiff.New)
+	}
+
+	// Verify no diff was generated for rules.1 or count
+	if _, ok := diff.Attributes["rules.#"]; ok {
+		t.Fatalf("unexpected diff on rules.#: %#v", diff.Attributes["rules.#"])
+	}
+	for k := range diff.Attributes {
+		if strings.HasPrefix(k, "rules.1.") {
+			t.Fatalf("unexpected diff on rule2 at %s: %#v", k, diff.Attributes[k])
+		}
+	}
+}
+
+func TestResourceDiff_TypeList_SortFunc(t *testing.T) {
+	ruleSchema := &Resource{
+		Schema: map[string]*Schema{
+			"rules": {
+				Type:     TypeList,
+				Optional: true,
+				SortFunc: func(a, b interface{}) bool {
+					mapA, _ := a.(map[string]interface{})
+					mapB, _ := b.(map[string]interface{})
+					// Sort by priority descending
+					pA, _ := mapA["priority"].(int)
+					pB, _ := mapB["priority"].(int)
+					return pA > pB
+				},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"priority": {Type: TypeInt, Required: true},
+						"val":      {Type: TypeString, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	// Prior state has higher priority (200) at index 0, lower priority (100) at index 1
+	state := &terraform.InstanceState{
+		ID: "r-1",
+		Attributes: map[string]string{
+			"rules.#":          "2",
+			"rules.0.priority": "200",
+			"rules.0.val":      "old-high",
+			"rules.1.priority": "100",
+			"rules.1.val":      "low",
+		},
+	}
+
+	// Config supplies rules in ascending priority order (100 first, 200 second),
+	// but modifies val of 200 to "new-high"
+	config := testConfig(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"priority": 100,
+				"val":      "low",
+			},
+			map[string]interface{}{
+				"priority": 200,
+				"val":      "new-high",
+			},
+		},
+	})
+
+	diff, err := ruleSchema.Diff(context.Background(), state, config, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	if diff == nil {
+		t.Fatal("expected non-nil diff")
+	}
+
+	// Because of SortFunc (descending priority), priority 200 is index 0.
+	// Only rules.0.val should be modified.
+	attrDiff, ok := diff.Attributes["rules.0.val"]
+	if !ok {
+		t.Fatalf("expected diff on rules.0.val, got: %#v", diff.Attributes)
+	}
+	if attrDiff.Old != "old-high" || attrDiff.New != "new-high" {
+		t.Fatalf("expected Old: 'old-high', New: 'new-high', got Old: %q, New: %q", attrDiff.Old, attrDiff.New)
+	}
+
+	if _, ok := diff.Attributes["rules.#"]; ok {
+		t.Fatalf("unexpected diff on rules.#: %#v", diff.Attributes["rules.#"])
+	}
+	for k := range diff.Attributes {
+		if strings.HasPrefix(k, "rules.1.") {
+			t.Fatalf("unexpected diff on rule 1 at %s: %#v", k, diff.Attributes[k])
+		}
+	}
+}
+
+func TestResourceDiff_TypeList_SortKeys_DuplicatesRejected(t *testing.T) {
+	ruleSchema := &Resource{
+		Schema: map[string]*Schema{
+			"rules": {
+				Type:     TypeList,
+				Optional: true,
+				SortKeys: []string{"direction", "priority"},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"direction":   {Type: TypeString, Required: true},
+						"priority":    {Type: TypeInt, Required: true},
+						"name":        {Type: TypeString, Required: true},
+						"description": {Type: TypeString, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	config := testConfig(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"direction": "Inbound",
+				"priority":  100,
+				"name":      "rule-a",
+			},
+			map[string]interface{}{
+				"direction": "Inbound",
+				"priority":  100, // Duplicate compound key!
+				"name":      "rule-b",
+			},
+		},
+	})
+
+	// Diff should return an error
+	_, err := ruleSchema.Diff(context.Background(), nil, config, nil)
+	if err == nil {
+		t.Fatal("expected Diff to fail with duplicate compound keys, got nil error")
+	}
+	expected := "duplicate list element with sort keys [direction=Inbound, priority=100]"
+	if !strings.Contains(err.Error(), expected) {
+		t.Fatalf("expected error containing %q, got: %s", expected, err)
+	}
+
+	// Validate should return a diagnostic error
+	diags := ruleSchema.Validate(config)
+	if !diags.HasError() {
+		t.Fatal("expected Validate to produce diagnostic error on duplicate keys, got none")
+	}
+}
+
+func TestResourceDiff_TypeList_SortKeys_AnchorAndComputedSecondary(t *testing.T) {
+	ruleSchema := &Resource{
+		Schema: map[string]*Schema{
+			"rules": {
+				Type:     TypeList,
+				Optional: true,
+				SortKeys: []string{"name"},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"name": {Type: TypeString, Required: true},
+						"id":   {Type: TypeString, Computed: true},
+						"val":  {Type: TypeString, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	// Prior state has rules with server-allocated IDs:
+	// Index 0: rule-alpha, id-1, "old-alpha"
+	// Index 1: rule-beta, id-2, "old-beta"
+	state := &terraform.InstanceState{
+		ID: "res-1",
+		Attributes: map[string]string{
+			"rules.#":      "2",
+			"rules.0.name": "rule-alpha",
+			"rules.0.id":   "id-1",
+			"rules.0.val":  "old-alpha",
+			"rules.1.name": "rule-beta",
+			"rules.1.id":   "id-2",
+			"rules.1.val":  "old-beta",
+		},
+	}
+
+	// Config provides rules in reverse order without id (as users don't configure computed id),
+	// modifying only rule-alpha val to "new-alpha":
+	config := testConfig(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"name": "rule-beta",
+				"val":  "old-beta",
+			},
+			map[string]interface{}{
+				"name": "rule-alpha",
+				"val":  "new-alpha",
+			},
+		},
+	})
+
+	diff, err := ruleSchema.Diff(context.Background(), state, config, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if diff == nil {
+		t.Fatal("expected non-nil diff")
+	}
+
+	// Because of anchor key "name", rule-alpha correctly maps to index 0.
+	// Only rules.0.val should have an in-place diff.
+	attrDiff, ok := diff.Attributes["rules.0.val"]
+	if !ok {
+		t.Fatalf("expected in-place diff at rules.0.val, got: %#v", diff.Attributes)
+	}
+	if attrDiff.Old != "old-alpha" || attrDiff.New != "new-alpha" {
+		t.Fatalf("expected Old: 'old-alpha', New: 'new-alpha', got Old: %q, New: %q", attrDiff.Old, attrDiff.New)
+	}
+
+	if _, ok := diff.Attributes["rules.#"]; ok {
+		t.Fatalf("unexpected diff on count: %#v", diff.Attributes["rules.#"])
+	}
+	for k := range diff.Attributes {
+		if strings.HasPrefix(k, "rules.1.") {
+			t.Fatalf("unexpected diff on rule-beta at %s: %#v", k, diff.Attributes[k])
+		}
+	}
+}
+
+func TestResourceDiff_TypeList_SortKeys_ElementRemovalWithComputedAttributes(t *testing.T) {
+	ruleSchema := &Resource{
+		Schema: map[string]*Schema{
+			"rules": {
+				Type:     TypeList,
+				Optional: true,
+				SortKeys: []string{"name"},
+				Elem: &Resource{
+					Schema: map[string]*Schema{
+						"name": {Type: TypeString, Required: true},
+						"id":   {Type: TypeString, Computed: true},
+						"desc": {Type: TypeString, Optional: true},
+					},
+				},
+			},
+		},
+	}
+
+	// Prior state has 3 elements:
+	// Index 0: http-lstn-1, id-1
+	// Index 1: http-lstn-2, id-2
+	// Index 2: http-lstn-4, id-4
+	state := &terraform.InstanceState{
+		ID: "appgw-1",
+		Attributes: map[string]string{
+			"rules.#":       "3",
+			"rules.0.name":  "http-lstn-1",
+			"rules.0.id":    "/sub/http-lstn-1",
+			"rules.0.desc":  "desc-1",
+			"rules.1.name":  "http-lstn-2",
+			"rules.1.id":    "/sub/http-lstn-2",
+			"rules.1.desc":  "desc-2",
+			"rules.2.name":  "http-lstn-4",
+			"rules.2.id":    "/sub/http-lstn-4",
+			"rules.2.desc":  "desc-4",
+		},
+	}
+
+	// Config removes http-lstn-2, keeping http-lstn-4 and http-lstn-1 (in reverse config order):
+	config := testConfig(t, map[string]interface{}{
+		"rules": []interface{}{
+			map[string]interface{}{
+				"name": "http-lstn-4",
+				"desc": "desc-4",
+			},
+			map[string]interface{}{
+				"name": "http-lstn-1",
+				"desc": "desc-1",
+			},
+		},
+	})
+
+	diff, err := ruleSchema.Diff(context.Background(), state, config, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if diff == nil {
+		t.Fatal("expected non-nil diff")
+	}
+
+	// Realignment must ensure:
+	// - rules.0 is http-lstn-1, and its id is /sub/http-lstn-1 (ZERO diff)
+	// - rules.1 is http-lstn-4, and its id is /sub/http-lstn-4 (ZERO diff)
+	// - rules.2 (http-lstn-2) is marked removed!
+	// - rules.# diff is 3 -> 2
+	for k, attr := range diff.Attributes {
+		if strings.HasPrefix(k, "rules.0.") {
+			t.Fatalf("unexpected diff on surviving rule 0 at %s: %#v", k, attr)
+		}
+		if strings.HasPrefix(k, "rules.1.") {
+			t.Fatalf("unexpected diff on surviving rule 1 at %s: %#v", k, attr)
+		}
+	}
+
+	// Count diff must be 3 -> 2
+	countDiff, ok := diff.Attributes["rules.#"]
+	if !ok {
+		t.Fatal("expected diff on rules.#")
+	}
+	if countDiff.Old != "3" || countDiff.New != "2" {
+		t.Fatalf("expected count 3 -> 2, got %s -> %s", countDiff.Old, countDiff.New)
+	}
+
+	// In realigned state, index 1's ID must be /sub/http-lstn-4 (NOT /sub/http-lstn-2!)
+	if id1 := state.Attributes["rules.1.id"]; id1 != "/sub/http-lstn-4" {
+		t.Fatalf("expected realigned state rules.1.id to be /sub/http-lstn-4, got %q", id1)
+	}
+	if name1 := state.Attributes["rules.1.name"]; name1 != "http-lstn-4" {
+		t.Fatalf("expected realigned state rules.1.name to be http-lstn-4, got %q", name1)
+	}
+}
+
+
+
+
