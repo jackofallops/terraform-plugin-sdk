@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -373,5 +374,149 @@ func TestRealignProposedNewStateForSortKeys(t *testing.T) {
 	}
 }
 
+func TestSchema_CanonicaliseList_SortKeysAndSortFunc_ComputedAttributes(t *testing.T) {
+	parseSemver := func(v string) (int, int, int) {
+		var maj, min, patch int
+		fmt.Sscanf(v, "%d.%d.%d", &maj, &min, &patch)
+		return maj, min, patch
+	}
 
+	semverSortFunc := func(a, b interface{}) bool {
+		mapA, okA := a.(map[string]interface{})
+		mapB, okB := b.(map[string]interface{})
+		if !okA || !okB {
+			return okA
+		}
+		vA, _ := mapA["version"].(string)
+		vB, _ := mapB["version"].(string)
+		majA, minA, patchA := parseSemver(vA)
+		majB, minB, patchB := parseSemver(vB)
+		if majA != majB {
+			return majA < majB
+		}
+		if minA != minB {
+			return minA < minB
+		}
+		return patchA < patchB
+	}
 
+	sch := map[string]*Schema{
+		"upgrade_path": {
+			Type:     TypeList,
+			Optional: true,
+			SortKeys: []string{"version"},
+			SortFunc: semverSortFunc,
+			Elem: &Resource{
+				Schema: map[string]*Schema{
+					"version": {
+						Type:     TypeString,
+						Required: true,
+					},
+					"release_notes_id": {
+						Type:     TypeString,
+						Computed: true,
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Verify canonicalizeList orders by SemVer ("1.10.0" comes after "1.2.0")
+	inputList := []interface{}{
+		map[string]interface{}{"version": "1.10.0"},
+		map[string]interface{}{"version": "1.2.0"},
+		map[string]interface{}{"version": "1.1.0"},
+	}
+	canonicalized := sch["upgrade_path"].canonicalizeList(inputList)
+	expectedOrder := []string{"1.1.0", "1.2.0", "1.10.0"}
+	for i, exp := range expectedOrder {
+		actual := canonicalized[i].(map[string]interface{})["version"].(string)
+		if actual != exp {
+			t.Fatalf("canonicalizeList index %d: expected %q, got %q", i, exp, actual)
+		}
+	}
+
+	// 2. Verify realignProposedNewStateForSortKeys:
+	// - restores computed attribute release_notes_id based on SortKeys ("version")
+	// - sorts proposed elements by SortFunc (SemVer order: 1.1.0, 1.2.0, 1.10.0)
+	priorVal := cty.ObjectVal(map[string]cty.Value{
+		"upgrade_path": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.10.0"),
+				"release_notes_id": cty.StringVal("rn-1-10-0"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.2.0"),
+				"release_notes_id": cty.StringVal("rn-1-2-0"),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.1.0"),
+				"release_notes_id": cty.StringVal("rn-1-1-0"),
+			}),
+		}),
+	})
+
+	configVal := cty.ObjectVal(map[string]cty.Value{
+		"upgrade_path": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.10.0"),
+				"release_notes_id": cty.NullVal(cty.String),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.2.0"),
+				"release_notes_id": cty.NullVal(cty.String),
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.1.0"),
+				"release_notes_id": cty.NullVal(cty.String),
+			}),
+		}),
+	})
+
+	// Suppose Core cross-wired the IDs because config had a different sequence
+	proposedVal := cty.ObjectVal(map[string]cty.Value{
+		"upgrade_path": cty.ListVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.10.0"),
+				"release_notes_id": cty.StringVal("rn-1-1-0"), // cross-wired by Core
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.2.0"),
+				"release_notes_id": cty.StringVal("rn-1-10-0"), // cross-wired by Core
+			}),
+			cty.ObjectVal(map[string]cty.Value{
+				"version":          cty.StringVal("1.1.0"),
+				"release_notes_id": cty.StringVal("rn-1-2-0"), // cross-wired by Core
+			}),
+		}),
+	})
+
+	realigned := realignProposedNewStateForSortKeys(sch, proposedVal, priorVal, configVal)
+	realignedList := realigned.GetAttr("upgrade_path").AsValueSlice()
+
+	expectedRealigned := []struct {
+		version string
+		rnID    string
+	}{
+		{"1.1.0", "rn-1-1-0"},
+		{"1.2.0", "rn-1-2-0"},
+		{"1.10.0", "rn-1-10-0"},
+	}
+
+	if len(realignedList) != len(expectedRealigned) {
+		t.Fatalf("expected %d elements, got %d", len(expectedRealigned), len(realignedList))
+	}
+
+	for i, exp := range expectedRealigned {
+		elem := realignedList[i]
+		actualVer := elem.GetAttr("version").AsString()
+		actualID := elem.GetAttr("release_notes_id").AsString()
+
+		if actualVer != exp.version {
+			t.Errorf("at index %d: expected version %q, got %q", i, exp.version, actualVer)
+		}
+		if actualID != exp.rnID {
+			t.Errorf("at index %d: expected release_notes_id %q, got %q", i, exp.rnID, actualID)
+		}
+	}
+}

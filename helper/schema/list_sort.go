@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-cty/cty"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/internal/configs/hcl2shim"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 )
 
@@ -476,8 +477,13 @@ func realignProposedNewStateForSortKeys(schemaMap map[string]*Schema, proposed, 
 			}
 		}
 
-		// Sort newSlice into canonical order by SortKeys
+		// Sort newSlice into canonical order by SortFunc (if present) or SortKeys
 		sort.SliceStable(newSlice, func(i, j int) bool {
+			if sch.SortFunc != nil {
+				a := hcl2shim.ConfigValueFromHCL2(newSlice[i])
+				b := hcl2shim.ConfigValueFromHCL2(newSlice[j])
+				return sch.SortFunc(a, b)
+			}
 			return compareCtyElementsByKeys(newSlice[i], newSlice[j], sch.SortKeys)
 		})
 

@@ -5501,7 +5501,7 @@ func TestSchemaMap_InternalValidate_SortKeys(t *testing.T) {
 					},
 				},
 			},
-			Err: true,
+			Err: false,
 		},
 		"SortKeys with non-Resource Elem": {
 			In: map[string]*Schema{

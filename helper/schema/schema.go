@@ -263,13 +263,13 @@ type Schema struct {
 
 	// SortKeys defines ordered attribute names used to sort TypeList elements canonically.
 	// When configured:
-	//   - Elements are sorted lexicographically by compound key across all stages:
+	//   - Elements are sorted by compound key across all stages:
 	//     prior state, configuration, proposed state, planned state, and new state.
+	//     (Sorting uses lexicographical comparison by default, or SortFunc if also defined).
 	//   - Elements must be *Resource (nested blocks).
 	//   - Each referenced attribute must be a Required primitive attribute.
 	//   - List elements must have unique compound SortKeys values. Duplicate items sharing
 	//     the same sort keys will fail validation during plan.
-	//   - SortKeys cannot be configured simultaneously with SortFunc.
 	//
 	// When SortKeys is defined, the engine automatically aligns prior state attributes
 	// by compound key across additions, removals, and reordering. Server-computed
@@ -278,7 +278,10 @@ type Schema struct {
 	SortKeys []string
 
 	// SortFunc defines a custom comparison function used to sort TypeList elements.
-	// It cannot be configured simultaneously with SortKeys.
+	// When configured alone, it provides custom in-memory ordering for lists of primitives
+	// or blocks without computed attribute realignment. When configured alongside SortKeys,
+	// SortKeys provides block identity and computed attribute realignment while SortFunc
+	// provides custom element ordering (e.g., SemVer).
 	SortFunc SchemaSortFunc
 
 	// ComputedWhen is a set of queries on the configuration. Whenever any
@@ -1160,9 +1163,6 @@ func (m schemaMap) internalValidate(topSchemaMap schemaMap, attrsOnly bool) erro
 				return fmt.Errorf("%s: SortFunc can only be set for TypeList", k)
 			}
 		} else {
-			if len(v.SortKeys) > 0 && v.SortFunc != nil {
-				return fmt.Errorf("%s: SortKeys and SortFunc cannot both be set", k)
-			}
 			if len(v.SortKeys) > 0 {
 				childRes, ok := v.Elem.(*Resource)
 				if !ok {
